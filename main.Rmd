@@ -1,0 +1,160 @@
+---
+title: Low frequency trend
+---
+
+```{r include = FALSE}
+library(tidyverse)
+knitr::opts_chunk$set(
+  echo = TRUE
+)
+```
+
+This document will serve as a repository of thoughts about the number of years necessary to detect changes in low frequency events. The proximate issue is a desire to detect differences in frequency of hurricanes which make landfall in the US. We have a time series of more than 100 years, but the number of events in each year, is quite low, at an average of fewer than 2 storms per year.
+
+## A thought experiment
+
+We begin with a thought experiment. We will randomly generate time series, where each observation is Poisson distributed. The $\lambda$ will vary at each point in time, under several different scenarios. We articulate the change as that which takes effect over a 100-year period. That is, a 10% increase in frequency, will represent the total change over 100 years, or `r 1.1 ^ (1 / 100) - 1` each year. 
+
+The basic parameters of the simulation are given below. Note that we will simulate the various time series one thousand times each.
+
+```{r}
+total_period <- 100
+lambda <- 197 / (2017 - 1900)
+sims <- 1e3
+```
+
+From this, we construct a table of scenarios. We're being semi-lazy about the number of events. We could generate 100 observations and subset, but I can't be arsed to think through that. This way, we'll have exactly what we need right from the start.
+
+Note that we have one baseline scenario where there is no change in lambda.
+
+```{r }
+tbl_scenarios <- expand_grid(
+  num_years = c(20, 50, 100)
+  , total_change = c(0, 0.1, 0.5, 1, 1.5, 2, 2.5, 3)
+) %>% 
+  mutate(
+    annual_change = (total_change + 1) ^ (1 / total_period)
+    , annual_change = annual_change - 1
+  )
+```
+
+We write a short convenience function to generate the simulations. We'll return a data frame as that's easy to use in functions like `glm()`.
+
+```{r }
+sim_hurricanes <- function(n, change, lambda = 2) {
+  
+  t = seq_len(n)
+  change <- (1 + rep(change, n)) ^ (t - 1)
+  lambdas <- lambda * change
+  tibble(
+    hurricanes = rpois(n, lambdas)
+    , t
+  )
+}
+```
+
+Let's try it out to make sure that we're getting what we like. We'll use an extreme rate of change so that changes in the Poisson are observable.
+
+```{r}
+sim_hurricanes(5, 2)
+```
+
+Groovy. Now we can expand our scenario table to hold all of the simulations and then add a table in each cell.
+
+```{r }
+tbl_sims <- tbl_scenarios %>%
+  expand_grid(
+    sim = seq_len(sims)
+  ) %>% 
+  mutate(
+    hurricanes = map2(num_years, annual_change, sim_hurricanes, lambda)
+  )
+```
+
+With that, we can fit each simulation. We'll write a basic function for that. The function does very little, but it is defensive about `glm()` being unable to converge.
+
+```{r }
+fit_hurricane <- function(tbl_in) {
+  
+  fit_obj <- try({
+    suppressWarnings(glm(data = tbl_in, formula = hurricanes ~ 1 + t, family = poisson()))
+    }
+    , silent = TRUE
+  )
+  
+  if (inherits(fit_obj, 'try-error')) 
+    return(NA)
+  else 
+    return(fit_obj)
+}
+```
+
+```{r }
+tbl_sims <- tbl_sims %>% 
+  mutate(
+    fit = map(hurricanes, fit_hurricane)
+  )
+```
+
+Storing all the data frames and fits leaves us with a fairly cumbersome object. We'll extract the interesting bits into a new table.
+
+```{r }
+mojo <- tbl_sims$fit[[24000]]
+gonzo <- summary(mojo)
+
+tbl_results <- tbl_sims %>% 
+  filter(
+    !is.na(fit)
+  ) %>% 
+  mutate(
+      summary = map(fit, summary)
+    , coef = map(summary, coefficients)
+    , intercept = map_dbl(coef, 1)
+    , t = map_dbl(coef, 2)
+    , intercept_se = map_dbl(coef, 3)
+    , t_se = map_dbl(coef, 4)
+  ) %>% 
+  select(
+    -hurricanes, -fit, -sim, -coef, -summary
+  )
+
+tbl_results <- tbl_results %>% 
+  mutate(
+    total_t = (1 + t) ^ (total_period) - 1
+  )
+```
+
+First let's see whether our simulations ever detected an increase when there was none. That is, we improperly reject the null.
+
+```{r }
+tbl_results %>%
+  filter(total_change == 0) %>% 
+  ggplot(aes(total_t)) + 
+  geom_histogram() + 
+  facet_wrap(~ num_years, scales = 'free_x')
+```
+
+
+```{r }
+tbl_results %>% 
+  group_by(num_years, total_change) %>% 
+  summarise_at('total_t', list(median, mean), na.rm = TRUE) %>% 
+  View()
+
+tbl_sims %>% 
+  filter(n == 100) %>% 
+  slice(1) %>% 
+  pull(hurricanes) %>% 
+  View()
+
+tbl_sims$hurricanes[[25000]] %>% 
+  View()
+
+tbl_mojo <- tbl_sims %>% 
+  select(hurricanes) 
+```
+
+
+# Various schemes for normalization
+
+# Other stuff
